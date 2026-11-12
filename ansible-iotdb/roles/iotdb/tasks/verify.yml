@@ -133,7 +133,7 @@
   retries: 10
   delay: 3
   until: iotdb_rest_ping.status == 200
-  when: iotdb_eff_rest_enabled == 'true'
+  when: (iotdb_eff_rest_enabled | string | lower) == 'true'
 
 - name: 通过 REST 执行 SQL（Basic Auth）
   ansible.builtin.uri:
@@ -147,7 +147,7 @@
     force_basic_auth: true
     status_code: 200
   register: iotdb_rest_query
-  when: iotdb_eff_rest_enabled == 'true'
+  when: (iotdb_eff_rest_enabled | string | lower) == 'true'
 
 # 注意：IoTDB REST 会对字符串值做掩码（root -> ********），因此只校验列与库名后缀
 - name: 断言 REST 通道可查到冒烟库
@@ -157,12 +157,12 @@
       - "'ansible_smoke' in (iotdb_rest_query.json | to_json)"
     fail_msg: "REST 查询结果异常：{{ iotdb_rest_query.json | default('') }}"
     success_msg: "REST 通道正常：SHOW DATABASES 返回 .ansible_smoke"
-  when: iotdb_eff_rest_enabled == 'true'
+  when: (iotdb_eff_rest_enabled | string | lower) == 'true'
 
 - name: 汇总
   ansible.builtin.debug:
     msg:
       - "IoTDB {{ iotdb_version }} 1C1D 就绪 @ {{ iotdb_eff_rpc_address }}:{{ iotdb_eff_rpc_port }}"
-      - "ConfigNode 127.0.0.1:{{ iotdb_cn_internal_port }} | REST: {{ iotdb_eff_rest_port if iotdb_eff_rest_enabled == 'true' else 'disabled' }}"
+      - "ConfigNode 127.0.0.1:{{ iotdb_cn_internal_port }} | REST: {{ iotdb_eff_rest_port if (iotdb_eff_rest_enabled | string | lower) == 'true' else 'disabled' }}"
       - "配置文件 {{ iotdb_version_dir }}/conf/iotdb-system.properties 共 {{ iotdb_effective_properties | length }} 项已校验"
       - "数据 {{ iotdb_data_dir }} | 日志 {{ iotdb_log_dir }} | systemctl {start,stop,status} {{ iotdb_service_name }}"
