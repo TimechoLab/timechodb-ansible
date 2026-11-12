@@ -1,0 +1,7 @@
+---
+- name: Apache IoTDB 1C1D 部署与验证
+  hosts: ubuntu
+  become: true
+  gather_facts: true
+  roles:
+    - { role: iotdb, tags: [iotdb] }

@@ -1,0 +1,168 @@
+---
+# 单独执行（playbooks/iotdb-verify.yml）时也能拿到这些事实，因此这里兜底重算一次
+- name: 计算生效的 iotdb-system.properties
+  ansible.builtin.set_fact:
+    iotdb_effective_properties: "{{ iotdb_system_properties | combine(iotdb_system_properties_extra) }}"
+
+- name: 等待待处理的配置变更生效
+  ansible.builtin.meta: flush_handlers
+
+- name: 读取实际生效的配置文件
+  ansible.builtin.slurp:
+    src: "{{ iotdb_version_dir }}/conf/iotdb-system.properties"
+  register: iotdb_props_raw
+
+- name: 记录配置文件文本与生效端口
+  ansible.builtin.set_fact:
+    iotdb_props_text: "{{ iotdb_props_raw.content | b64decode }}"
+    iotdb_eff_rpc_port: "{{ iotdb_effective_properties['dn_rpc_port'] | default(iotdb_rpc_port) }}"
+    iotdb_eff_rpc_address: "{{ iotdb_effective_properties['dn_rpc_address'] | default(iotdb_rpc_address) }}"
+    iotdb_eff_rest_port: "{{ iotdb_effective_properties['rest_service_port'] | default(iotdb_rest_port) }}"
+    iotdb_eff_rest_enabled: "{{ iotdb_effective_properties['enable_rest_service'] | default(iotdb_enable_rest) | string | lower }}"
+
+- name: 逐项校验变量已写入 iotdb-system.properties
+  ansible.builtin.assert:
+    that:
+      - (item.key + '=' + (item.value | string)) in iotdb_props_text
+    fail_msg: "配置项未生效：{{ item.key }}={{ item.value }}"
+    success_msg: "{{ item.key }}={{ item.value }}"
+  loop: "{{ iotdb_effective_properties | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: 服务状态
+  ansible.builtin.systemd:
+    name: "{{ iotdb_service_name }}"
+  register: iotdb_service_state
+  changed_when: false
+
+- name: 断言服务已启动
+  ansible.builtin.assert:
+    that:
+      - iotdb_service_state.status.ActiveState == "active"
+    fail_msg: "iotdb.service 未处于 active：{{ iotdb_service_state.status.ActiveState }}"
+
+- name: 等待 ConfigNode 内部端口 {{ iotdb_cn_internal_port }}
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ iotdb_cn_internal_port }}"
+    timeout: 240
+    delay: 5
+
+- name: 等待 DataNode RPC 端口 {{ iotdb_eff_rpc_address }}:{{ iotdb_eff_rpc_port }}
+  ansible.builtin.wait_for:
+    host: "{{ iotdb_eff_rpc_address }}"
+    port: "{{ iotdb_eff_rpc_port }}"
+    timeout: 240
+    delay: 5
+
+- name: 查询集群状态
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf 'show cluster\n' | {{ iotdb_current }}/sbin/start-cli.sh \
+      -h {{ iotdb_eff_rpc_address }} -p {{ iotdb_eff_rpc_port }} -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_cluster_raw
+  changed_when: false
+  retries: 20
+  delay: 6
+  until: "'Running' in iotdb_cluster_raw.stdout"
+
+- name: 输出集群状态
+  ansible.builtin.debug:
+    var: iotdb_cluster_raw.stdout_lines
+
+- name: 统计 ConfigNode / DataNode 条目
+  ansible.builtin.set_fact:
+    iotdb_cn_count: "{{ iotdb_cluster_raw.stdout | regex_findall('ConfigNode') | length }}"
+    iotdb_dn_count: "{{ iotdb_cluster_raw.stdout | regex_findall('DataNode') | length }}"
+
+- name: 断言 1C1D 拓扑且状态 Running
+  ansible.builtin.assert:
+    that:
+      - "'Running' in iotdb_cluster_raw.stdout"
+      - iotdb_cn_count | int >= 1
+      - iotdb_dn_count | int >= 1
+    fail_msg: "集群状态不符合预期（CN={{ iotdb_cn_count }}, DN={{ iotdb_dn_count }}）：{{ iotdb_cluster_raw.stdout }}"
+    success_msg: "1C1D 就绪：ConfigNode / DataNode 均 Running"
+
+- name: 创建冒烟数据库
+  ansible.builtin.shell: |
+    printf 'CREATE DATABASE root.ansible_smoke\n' | {{ iotdb_current }}/sbin/start-cli.sh \
+      -h {{ iotdb_eff_rpc_address }} -p {{ iotdb_eff_rpc_port }} -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_create_db
+  changed_when: false
+  failed_when: false
+
+- name: 写入一条数据
+  ansible.builtin.shell: |
+    TS=$(($(date +%s) * 1000))
+    printf 'INSERT INTO root.ansible_smoke.d1(timestamp, s1) VALUES (%s, 42.0)\n' "$TS" | \
+      {{ iotdb_current }}/sbin/start-cli.sh -h {{ iotdb_eff_rpc_address }} -p {{ iotdb_eff_rpc_port }} \
+      -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_insert
+  changed_when: false
+
+- name: 查询数据
+  ansible.builtin.shell: |
+    printf 'SELECT s1 FROM root.ansible_smoke.d1\n' | {{ iotdb_current }}/sbin/start-cli.sh \
+      -h {{ iotdb_eff_rpc_address }} -p {{ iotdb_eff_rpc_port }} -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_select
+  changed_when: false
+  failed_when: false
+
+- name: 断言写读闭环
+  ansible.builtin.assert:
+    that:
+      - "'42.0' in iotdb_select.stdout"
+    fail_msg: "读写验证失败。insert={{ iotdb_insert.stdout }} select={{ iotdb_select.stdout }}"
+    success_msg: "写读闭环正常：root.ansible_smoke.d1 返回 42.0"
+
+- name: 检查 REST 服务健康（/ping）
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ iotdb_eff_rest_port }}/ping"
+    status_code: 200
+  register: iotdb_rest_ping
+  retries: 10
+  delay: 3
+  until: iotdb_rest_ping.status == 200
+  when: iotdb_eff_rest_enabled == 'true'
+
+- name: 通过 REST 执行 SQL（Basic Auth）
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ iotdb_eff_rest_port }}/rest/v1/query"
+    method: POST
+    body_format: json
+    body:
+      sql: "SHOW DATABASES"
+    url_username: root
+    url_password: "{{ iotdb_root_password }}"
+    force_basic_auth: true
+    status_code: 200
+  register: iotdb_rest_query
+  when: iotdb_eff_rest_enabled == 'true'
+
+# 注意：IoTDB REST 会对字符串值做掩码（root -> ********），因此只校验列与库名后缀
+- name: 断言 REST 通道可查到冒烟库
+  ansible.builtin.assert:
+    that:
+      - "'Database' in (iotdb_rest_query.json.columnNames | default([]))"
+      - "'ansible_smoke' in (iotdb_rest_query.json | to_json)"
+    fail_msg: "REST 查询结果异常：{{ iotdb_rest_query.json | default('') }}"
+    success_msg: "REST 通道正常：SHOW DATABASES 返回 .ansible_smoke"
+  when: iotdb_eff_rest_enabled == 'true'
+
+- name: 汇总
+  ansible.builtin.debug:
+    msg:
+      - "IoTDB {{ iotdb_version }} 1C1D 就绪 @ {{ iotdb_eff_rpc_address }}:{{ iotdb_eff_rpc_port }}"
+      - "ConfigNode 127.0.0.1:{{ iotdb_cn_internal_port }} | REST: {{ iotdb_eff_rest_port if iotdb_eff_rest_enabled == 'true' else 'disabled' }}"
+      - "配置文件 {{ iotdb_version_dir }}/conf/iotdb-system.properties 共 {{ iotdb_effective_properties | length }} 项已校验"
+      - "数据 {{ iotdb_data_dir }} | 日志 {{ iotdb_log_dir }} | systemctl {start,stop,status} {{ iotdb_service_name }}"

@@ -1,0 +1,227 @@
+---
+- name: Java 环境检查
+  ansible.builtin.import_tasks: java.yml
+
+- name: 读取当前 current 指向
+  ansible.builtin.command: readlink -f {{ iotdb_current }}
+  register: iotdb_up_link
+  changed_when: false
+  failed_when: false
+
+- name: 解析当前已装版本
+  ansible.builtin.set_fact:
+    iotdb_up_current_dir: "{{ iotdb_up_link.stdout | trim }}"
+    iotdb_up_current_version: >-
+      {{ (iotdb_up_link.stdout | trim | basename | regex_replace('^apache-iotdb-', '') | regex_replace('-all-bin$', ''))
+         if (iotdb_up_link.rc == 0 and (iotdb_up_link.stdout | trim | length) > 0) else '' }}
+    iotdb_up_eff: "{{ iotdb_system_properties | combine(iotdb_system_properties_extra) }}"
+
+- name: 升级计划
+  ansible.builtin.debug:
+    msg: "{{ iotdb_up_current_version | default('') or '(未安装)' }} -> {{ iotdb_version }}"
+
+- name: 校验已存在 1C1D 安装
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ iotdb_service_name }}.service"
+  register: iotdb_up_unit
+
+- name: 未发现已安装实例时终止
+  ansible.builtin.assert:
+    that:
+      - iotdb_up_unit.stat.exists
+      - iotdb_up_current_version | length > 0
+    fail_msg: "未检测到已安装的 1C1D 实例，请先运行 playbooks/iotdb.yml 安装"
+    success_msg: "检测到已安装实例：{{ iotdb_up_current_version }}"
+
+- name: 已经是目标版本
+  ansible.builtin.debug:
+    msg: "当前已是 {{ iotdb_version }}，无需升级（重装请用 playbooks/iotdb.yml）"
+  when: iotdb_up_current_version == iotdb_version
+
+- name: 禁止无意的降级
+  ansible.builtin.assert:
+    that:
+      - iotdb_version is version(iotdb_up_current_version, '>')
+    fail_msg: "目标 {{ iotdb_version }} 低于当前 {{ iotdb_up_current_version }}；确需降级请加 -e iotdb_allow_downgrade=true"
+    success_msg: "版本方向正确：{{ iotdb_up_current_version }} -> {{ iotdb_version }}"
+  when:
+    - iotdb_up_current_version != iotdb_version
+    - not (iotdb_allow_downgrade | bool)
+
+- name: 升级执行块
+  when: iotdb_up_current_version != iotdb_version
+  block:
+    - name: 前置检查：数据目录与非 root 磁盘余量
+      block:
+        - name: 数据目录存在
+          ansible.builtin.stat:
+            path: "{{ iotdb_data_dir }}"
+          register: iotdb_up_data
+
+        - name: 磁盘余量（GB）
+          ansible.builtin.shell: df -BG --output=avail {{ iotdb_install_dir }} | tail -1 | tr -dc '0-9'
+          args:
+            executable: /bin/bash
+          register: iotdb_up_df
+          changed_when: false
+
+        - name: 记录可用空间
+          ansible.builtin.set_fact:
+            iotdb_up_avail_gb: "{{ iotdb_up_df.stdout | int }}"
+
+        - name: 断言前置条件
+          ansible.builtin.assert:
+            that:
+              - iotdb_up_data.stat.exists
+              - iotdb_up_avail_gb | float >= iotdb_upgrade_min_free_gb | float
+            fail_msg: "前置检查失败：data={{ iotdb_up_data.stat.exists }}, 可用 {{ iotdb_up_avail_gb }}G"
+            success_msg: "前置检查通过：数据目录存在，磁盘可用 {{ iotdb_up_avail_gb }}G"
+
+    - name: 记录升级前的数据库列表
+      ansible.builtin.shell: |
+        set -o pipefail
+        printf 'show databases\n' | {{ iotdb_current }}/sbin/start-cli.sh \
+          -h {{ iotdb_up_eff.dn_rpc_address }} -p {{ iotdb_up_eff.dn_rpc_port }} \
+          -u root -pw {{ iotdb_root_password }} 2>/dev/null | awk -F'|' '/^\|root/{print $2}' | tr -d ' '
+      args:
+        executable: /bin/bash
+      register: iotdb_up_dbs_before
+      changed_when: false
+      failed_when: false
+
+    - name: 升级前数据库
+      ansible.builtin.debug:
+        msg: "{{ iotdb_up_dbs_before.stdout_lines | default([]) }}"
+
+    - name: 停止服务
+      ansible.builtin.systemd:
+        name: "{{ iotdb_service_name }}"
+        state: stopped
+
+    - name: 等待端口释放
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item }}"
+        state: stopped
+        timeout: 180
+      loop:
+        - "{{ iotdb_up_eff.dn_rpc_port }}"
+        - "{{ iotdb_up_eff.cn_internal_port }}"
+
+    - name: 获取新版本安装包
+      ansible.builtin.import_tasks: download.yml
+
+    - name: 解压新版本
+      ansible.builtin.unarchive:
+        src: "{{ iotdb_package_path }}"
+        dest: "{{ iotdb_install_dir }}"
+        remote_src: true
+        creates: "{{ iotdb_version_dir }}"
+        owner: "{{ iotdb_user }}"
+        group: "{{ iotdb_group }}"
+
+    - name: 渲染新版本配置并切换 current
+      ansible.builtin.import_tasks: configure.yml
+
+    - name: 应用配置变更并重启到新版本
+      ansible.builtin.meta: flush_handlers
+
+    - name: 启动服务
+      ansible.builtin.systemd:
+        name: "{{ iotdb_service_name }}"
+        state: started
+        daemon_reload: true
+
+    - name: 新版本启动与数据校验
+      block:
+        - name: 等待 ConfigNode 端口
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ iotdb_up_eff.cn_internal_port }}"
+            timeout: 240
+            delay: 5
+
+        - name: 等待 DataNode 端口
+          ansible.builtin.wait_for:
+            host: "{{ iotdb_up_eff.dn_rpc_address }}"
+            port: "{{ iotdb_up_eff.dn_rpc_port }}"
+            timeout: 300
+            delay: 5
+
+        - name: 查询运行版本
+          ansible.builtin.shell: |
+            printf 'show version\n' | {{ iotdb_current }}/sbin/start-cli.sh \
+              -h {{ iotdb_up_eff.dn_rpc_address }} -p {{ iotdb_up_eff.dn_rpc_port }} \
+              -u root -pw {{ iotdb_root_password }} 2>&1 | grep -E '\| *2\.0\.'
+          args:
+            executable: /bin/bash
+          register: iotdb_up_ver
+          changed_when: false
+          retries: 10
+          delay: 5
+          until: iotdb_version in iotdb_up_ver.stdout
+
+        - name: 断言运行版本
+          ansible.builtin.assert:
+            that:
+              - iotdb_version in iotdb_up_ver.stdout
+            fail_msg: "运行版本不是 {{ iotdb_version }}：{{ iotdb_up_ver.stdout }}"
+            success_msg: "运行版本已切换为 {{ iotdb_version }}"
+
+        - name: 通用验证（集群状态 / 写读 / 配置项 / REST）
+          ansible.builtin.import_tasks: verify.yml
+
+        - name: 查询升级后的数据库
+          ansible.builtin.shell: |
+            printf 'show databases\n' | {{ iotdb_current }}/sbin/start-cli.sh \
+              -h {{ iotdb_up_eff.dn_rpc_address }} -p {{ iotdb_up_eff.dn_rpc_port }} \
+              -u root -pw {{ iotdb_root_password }} 2>/dev/null | awk -F'|' '/^\|root/{print $2}' | tr -d ' '
+          args:
+            executable: /bin/bash
+          register: iotdb_up_dbs_after
+          changed_when: false
+
+        - name: 断言升级前数据都还在
+          ansible.builtin.assert:
+            that:
+              - item in iotdb_up_dbs_after.stdout_lines
+            fail_msg: "升级后丢失数据库：{{ item }}（现有：{{ iotdb_up_dbs_after.stdout_lines }}）"
+            success_msg: "数据保留：{{ item }}"
+          loop: "{{ iotdb_up_dbs_before.stdout_lines | default([]) }}"
+          loop_control:
+            label: "{{ item }}"
+
+      rescue:
+        - name: 升级失败，回滚到 {{ iotdb_up_current_version }}
+          ansible.builtin.file:
+            src: "{{ iotdb_up_current_dir }}"
+            dest: "{{ iotdb_current }}"
+            state: link
+            force: true
+
+        - name: 回滚后重启
+          ansible.builtin.systemd:
+            name: "{{ iotdb_service_name }}"
+            state: restarted
+            daemon_reload: true
+
+        - name: 回滚结果
+          ansible.builtin.debug:
+            msg: "升级到 {{ iotdb_version }} 失败，已回滚到 {{ iotdb_up_current_version }}（{{ iotdb_up_current_dir }}）"
+
+        - name: 抛出失败
+          ansible.builtin.fail:
+            msg: "升级失败已回滚，请查看日志：journalctl -u {{ iotdb_service_name }} -n 200"
+
+    - name: 清理旧版本目录
+      ansible.builtin.file:
+        path: "{{ iotdb_up_current_dir }}"
+        state: absent
+      when: not (iotdb_upgrade_keep_old | bool)
+
+    - name: 升级完成
+      ansible.builtin.debug:
+        msg:
+          - "{{ iotdb_up_current_version }} -> {{ iotdb_version }} 升级完成"
+          - "旧版本目录：{{ iotdb_up_current_dir }}（keep_old={{ iotdb_upgrade_keep_old }}）"
+          - "数据目录：{{ iotdb_data_dir }} | 服务：systemctl status {{ iotdb_service_name }}"

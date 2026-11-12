@@ -1,0 +1,56 @@
+---
+- name: 安装 Docker 与 Compose 插件
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: 创建 /etc/docker
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: 配置 daemon.json（镜像加速 + 日志轮转）
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart docker
+
+- name: 启动并开机自启 docker
+  ansible.builtin.systemd_service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: 将用户加入 docker 组
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+
+- name: 立即应用 daemon.json 变更
+  ansible.builtin.meta: flush_handlers
+
+- name: 读取 docker 版本
+  ansible.builtin.command: docker --version
+  register: docker_version
+  changed_when: false
+
+- name: 读取 compose 版本
+  ansible.builtin.command: docker compose version
+  register: compose_version
+  changed_when: false
+
+- name: 打印版本
+  ansible.builtin.debug:
+    msg:
+      - "{{ docker_version.stdout }}"
+      - "{{ compose_version.stdout }}"

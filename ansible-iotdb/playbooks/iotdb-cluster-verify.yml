@@ -1,0 +1,10 @@
+---
+- name: Apache IoTDB 3C3D 现状校验（只读）
+  hosts: ubuntu
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 执行校验
+      ansible.builtin.import_role:
+        name: iotdb_cluster
+        tasks_from: verify.yml

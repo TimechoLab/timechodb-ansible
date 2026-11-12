@@ -1,0 +1,10 @@
+---
+- name: Apache IoTDB 3C3D 集群版本升级（含升级验证与失败回滚）
+  hosts: ubuntu
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 执行升级
+      ansible.builtin.import_role:
+        name: iotdb_cluster
+        tasks_from: upgrade.yml

@@ -1,0 +1,80 @@
+---
+- name: 维护 current 符号链接
+  ansible.builtin.file:
+    src: "{{ iotdb_version_dir }}"
+    dest: "{{ iotdb_current }}"
+    state: link
+    force: true
+
+- name: 版本目录下的 data 指向持久化数据目录
+  ansible.builtin.file:
+    src: "{{ iotdb_data_dir }}"
+    dest: "{{ iotdb_version_dir }}/data"
+    state: link
+    force: true
+
+- name: 版本目录下的 logs 指向持久化日志目录
+  ansible.builtin.file:
+    src: "{{ iotdb_log_dir }}"
+    dest: "{{ iotdb_version_dir }}/logs"
+    state: link
+    force: true
+
+- name: 修正属主
+  ansible.builtin.file:
+    path: "{{ iotdb_version_dir }}"
+    state: directory
+    recurse: true
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    follow: false
+
+- name: 设置 ConfigNode 堆内存
+  ansible.builtin.lineinfile:
+    path: "{{ iotdb_version_dir }}/conf/confignode-env.sh"
+    regexp: '^MEMORY_SIZE='
+    line: 'MEMORY_SIZE=${MEMORY_SIZE:-{{ iotdb_memory_cn }}}'
+  notify: restart iotdb
+
+- name: 设置 DataNode 堆内存
+  ansible.builtin.lineinfile:
+    path: "{{ iotdb_version_dir }}/conf/datanode-env.sh"
+    regexp: '^MEMORY_SIZE='
+    line: 'MEMORY_SIZE=${MEMORY_SIZE:-{{ iotdb_memory_dn }}}'
+  notify: restart iotdb
+
+- name: 计算生效的 iotdb-system.properties
+  ansible.builtin.set_fact:
+    iotdb_effective_properties: "{{ iotdb_system_properties | combine(iotdb_system_properties_extra) }}"
+
+- name: 输出生效配置（键名与配置文件一致）
+  ansible.builtin.debug:
+    var: iotdb_effective_properties
+
+- name: 应用 iotdb-system.properties 配置项
+  ansible.builtin.lineinfile:
+    path: "{{ iotdb_version_dir }}/conf/iotdb-system.properties"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+  loop: "{{ iotdb_effective_properties | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  notify: restart iotdb
+
+- name: 部署启动包装脚本（CN 就绪后再起 DN）
+  ansible.builtin.template:
+    src: iotdb-start.sh.j2
+    dest: /usr/local/bin/iotdb-start.sh
+    owner: root
+    group: root
+    mode: "0755"
+  notify: restart iotdb
+
+- name: 部署 systemd 单元
+  ansible.builtin.template:
+    src: iotdb.service.j2
+    dest: "/etc/systemd/system/{{ iotdb_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart iotdb

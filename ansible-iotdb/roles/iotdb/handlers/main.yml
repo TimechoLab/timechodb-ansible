@@ -1,0 +1,13 @@
+---
+- name: stop iotdb
+  ansible.builtin.systemd:
+    name: "{{ iotdb_service_name }}"
+    state: stopped
+  listen: restart iotdb
+
+- name: start iotdb
+  ansible.builtin.systemd:
+    name: "{{ iotdb_service_name }}"
+    state: started
+    enabled: true
+  listen: restart iotdb

@@ -1,0 +1,286 @@
+---
+- name: Java 环境与版本校验
+  ansible.builtin.import_tasks: java.yml
+
+# 集群需独占 6667/10710 等端口
+- name: 检查 1C1D 实例是否在运行
+  ansible.builtin.command: systemctl is-active iotdb
+  register: iotdb_single_state
+  changed_when: false
+  failed_when: false
+
+- name: 与 1C1D 实例的端口冲突检查
+  ansible.builtin.assert:
+    that:
+      - iotdb_single_state.stdout | trim != 'active'
+    fail_msg: >-
+      检测到 1C1D 实例（iotdb.service）仍在运行，会占用 6667/10710 等端口。
+      请先 systemctl stop iotdb，或把 iotdb_nodes 的端口整体偏移。
+    success_msg: "无 1C1D 实例占用端口"
+
+- name: 读取集群当前版本（cn1 的版本标记）
+  ansible.builtin.command: cat {{ iotdb_nodes_root }}/cn1/.iotdb_version
+  register: iotdb_up_marker
+  changed_when: false
+  failed_when: false
+
+- name: 解析当前版本
+  ansible.builtin.set_fact:
+    iotdb_up_current_version: "{{ iotdb_up_marker.stdout | trim if iotdb_up_marker.rc == 0 else '' }}"
+
+- name: 计算当前发行包目录
+  ansible.builtin.set_fact:
+    iotdb_up_current_dist: "{{ iotdb_cluster_root }}/apache-iotdb-{{ iotdb_up_current_version }}-all-bin"
+
+- name: 升级计划
+  ansible.builtin.debug:
+    msg: "{{ iotdb_up_current_version | default('') or '(未安装)' }} -> {{ iotdb_version }}（{{ iotdb_nodes | length }} 个实例）"
+
+- name: 检查已部署的集群单元
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/iotdb-{{ item.name }}.service"
+  register: iotdb_up_units
+  loop: "{{ iotdb_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 未发现完整集群时终止
+  ansible.builtin.assert:
+    that:
+      - iotdb_up_current_version | length > 0
+      - iotdb_up_units.results | selectattr('stat.exists') | list | length == iotdb_nodes | length
+    fail_msg: "未检测到已部署的 {{ iotdb_nodes | length }} 节点集群，请先运行 playbooks/iotdb-cluster.yml"
+    success_msg: "检测到已部署集群，当前版本 {{ iotdb_up_current_version }}"
+
+- name: 已经是目标版本
+  ansible.builtin.debug:
+    msg: "集群当前已是 {{ iotdb_version }}，无需升级（重装请用 playbooks/iotdb-cluster.yml）"
+  when: iotdb_up_current_version == iotdb_version
+
+- name: 禁止无意的降级
+  ansible.builtin.assert:
+    that:
+      - iotdb_version is version(iotdb_up_current_version, '>')
+    fail_msg: "目标 {{ iotdb_version }} 低于当前 {{ iotdb_up_current_version }}；确需降级请加 -e iotdb_allow_downgrade=true"
+    success_msg: "版本方向正确：{{ iotdb_up_current_version }} -> {{ iotdb_version }}"
+  when:
+    - iotdb_up_current_version != iotdb_version
+    - not (iotdb_allow_downgrade | bool)
+
+- name: 集群升级执行块
+  when: iotdb_up_current_version != iotdb_version
+  block:
+    - name: 前置检查
+      block:
+        - name: 数据目录存在
+          ansible.builtin.stat:
+            path: "{{ iotdb_data_root }}/cn1"
+          register: iotdb_up_data
+
+        - name: 磁盘余量（GB）
+          ansible.builtin.shell: df -BG --output=avail {{ iotdb_cluster_root }} | tail -1 | tr -dc '0-9'
+          args:
+            executable: /bin/bash
+          register: iotdb_up_df
+          changed_when: false
+
+        - name: 断言前置条件
+          ansible.builtin.assert:
+            that:
+              - iotdb_up_data.stat.exists
+              - iotdb_up_df.stdout | int >= iotdb_upgrade_min_free_gb | int
+            fail_msg: "前置检查失败：data={{ iotdb_up_data.stat.exists }}, 可用 {{ iotdb_up_df.stdout }}G"
+            success_msg: "前置检查通过：数据目录存在，磁盘可用 {{ iotdb_up_df.stdout }}G（快照需额外 ~1.4G）"
+
+    - name: 记录升级前的数据库列表
+      ansible.builtin.shell: |
+        printf 'show databases\n' | {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh \
+          -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} 2>/dev/null \
+          | awk -F'|' '/^\|root/{print $2}' | tr -d ' '
+      args:
+        executable: /bin/bash
+      register: iotdb_up_dbs_before
+      changed_when: false
+      failed_when: false
+
+    - name: 升级前数据库
+      ansible.builtin.debug:
+        msg: "{{ iotdb_up_dbs_before.stdout_lines | default([]) }}"
+
+    - name: 逆序停止全部实例
+      ansible.builtin.systemd:
+        name: "iotdb-{{ node.name }}"
+        state: stopped
+      loop: "{{ iotdb_nodes | reverse | list }}"
+      loop_control:
+        loop_var: node
+      failed_when: false
+
+    - name: 计算需要释放的端口
+      ansible.builtin.set_fact:
+        iotdb_up_ports: >-
+          {{ (iotdb_nodes | selectattr('type', 'equalto', 'confignode')
+              | map(attribute='ports') | map(attribute='cn_internal_port') | list)
+           + (iotdb_nodes | selectattr('type', 'equalto', 'datanode')
+              | map(attribute='ports') | map(attribute='dn_rpc_port') | list) }}
+
+    - name: 等待端口释放
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item }}"
+        state: stopped
+        timeout: 180
+      loop: "{{ iotdb_up_ports }}"
+
+    - name: 获取新版本安装包
+      ansible.builtin.import_tasks: download.yml
+
+    - name: 解压新版本发行包
+      ansible.builtin.unarchive:
+        src: "{{ iotdb_package_path }}"
+        dest: "{{ iotdb_cluster_root }}"
+        remote_src: true
+        creates: "{{ iotdb_dist_dir }}"
+        owner: "{{ iotdb_user }}"
+        group: "{{ iotdb_group }}"
+
+    - name: 逐节点快照并切到新版本
+      ansible.builtin.include_tasks: upgrade_node.yml
+      loop: "{{ iotdb_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 重载 systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: 应用配置变更（触发重启）
+      ansible.builtin.meta: flush_handlers
+
+    - name: 启动新版本集群
+      ansible.builtin.include_tasks: start.yml
+
+    - name: 新版本验证（失败自动回滚）
+      block:
+        - name: 等待 ConfigNode 端口
+          ansible.builtin.wait_for:
+            host: "{{ iotdb_rpc_address }}"
+            port: "{{ node.ports.cn_internal_port }}"
+            timeout: 300
+            delay: 5
+          loop: "{{ iotdb_nodes | selectattr('type', 'equalto', 'confignode') | list }}"
+          loop_control:
+            loop_var: node
+
+        - name: 等待 DataNode RPC 端口
+          ansible.builtin.wait_for:
+            host: "{{ iotdb_rpc_address }}"
+            port: "{{ node.ports.dn_rpc_port }}"
+            timeout: 300
+            delay: 5
+          loop: "{{ iotdb_nodes | selectattr('type', 'equalto', 'datanode') | list }}"
+          loop_control:
+            loop_var: node
+
+        - name: 查询集群拓扑与版本
+          ansible.builtin.shell: |
+            set -o pipefail
+            printf 'show cluster\n' | {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh \
+              -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} 2>&1
+          args:
+            executable: /bin/bash
+          register: iotdb_up_cluster
+          changed_when: false
+          retries: 30
+          delay: 6
+          until:
+            - iotdb_up_cluster.stdout | regex_findall('Running') | length >= iotdb_nodes | length
+            - iotdb_version in iotdb_up_cluster.stdout
+
+        - name: 输出集群拓扑
+          ansible.builtin.debug:
+            var: iotdb_up_cluster.stdout_lines
+
+        - name: 断言 6 节点 Running 且版本为目标版本
+          ansible.builtin.assert:
+            that:
+              - iotdb_up_cluster.stdout | regex_findall('Running') | length >= iotdb_nodes | length
+              - iotdb_up_cluster.stdout | regex_findall('ConfigNode') | length == iotdb_expect_cn | int
+              - iotdb_up_cluster.stdout | regex_findall('DataNode') | length == iotdb_expect_dn | int
+              - iotdb_version in iotdb_up_cluster.stdout
+            fail_msg: "集群未达预期：{{ iotdb_up_cluster.stdout }}"
+            success_msg: "{{ iotdb_expect_cn }}C{{ iotdb_expect_dn }}D 已运行在 {{ iotdb_version }}"
+
+        - name: 查询升级后的数据库
+          ansible.builtin.shell: |
+            printf 'show databases\n' | {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh \
+              -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} 2>/dev/null \
+              | awk -F'|' '/^\|root/{print $2}' | tr -d ' '
+          args:
+            executable: /bin/bash
+          register: iotdb_up_dbs_after
+          changed_when: false
+
+        - name: 断言升级前数据都还在
+          ansible.builtin.assert:
+            that:
+              - item in iotdb_up_dbs_after.stdout_lines
+            fail_msg: "升级后丢失数据库：{{ item }}"
+            success_msg: "数据保留：{{ item }}"
+          loop: "{{ iotdb_up_dbs_before.stdout_lines | default([]) }}"
+          loop_control:
+            label: "{{ item }}"
+
+        - name: 跨节点写读（dn1 写、dn3 读）
+          ansible.builtin.shell: |
+            TS=$(($(date +%s) * 1000))
+            printf 'CREATE DATABASE root.ansible_smoke\n' | {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh \
+              -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} >/dev/null 2>&1 || true
+            printf 'INSERT INTO root.ansible_smoke.d1(timestamp, s1) VALUES (%s, 42.0)\n' "$TS" | \
+              {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh -h {{ iotdb_rpc_address }} -p 6667 \
+              -u root -pw {{ iotdb_root_password }} >/dev/null 2>&1
+            printf 'SELECT s1 FROM root.ansible_smoke.d1\n' | {{ iotdb_nodes_root }}/dn3/sbin/start-cli.sh \
+              -h {{ iotdb_rpc_address }} -p 6669 -u root -pw {{ iotdb_root_password }} 2>&1
+          args:
+            executable: /bin/bash
+          register: iotdb_up_cross
+          changed_when: false
+
+        - name: 断言跨节点写读
+          ansible.builtin.assert:
+            that:
+              - "'42.0' in iotdb_up_cross.stdout"
+            fail_msg: "跨节点读失败：{{ iotdb_up_cross.stdout }}"
+            success_msg: "跨节点写读正常：dn1 写、dn3 读回 42.0"
+
+        - name: 通用集群验证
+          ansible.builtin.import_tasks: verify.yml
+
+      rescue:
+        - name: 回滚到 {{ iotdb_up_current_version }}
+          ansible.builtin.include_tasks: rollback.yml
+
+        - name: 抛出失败
+          ansible.builtin.fail:
+            msg: "升级到 {{ iotdb_version }} 失败，已回滚到 {{ iotdb_up_current_version }}，请查看日志：journalctl -u iotdb-dn1 -n 200"
+
+    - name: 清理实例快照（回滚点）
+      ansible.builtin.file:
+        path: "{{ iotdb_nodes_root }}/{{ item.name }}.prev"
+        state: absent
+      loop: "{{ iotdb_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: 清理旧版本发行包目录
+      ansible.builtin.file:
+        path: "{{ iotdb_up_current_dist }}"
+        state: absent
+      when: not (iotdb_upgrade_keep_old | bool)
+
+    - name: 升级完成
+      ansible.builtin.debug:
+        msg:
+          - "{{ iotdb_up_current_version }} -> {{ iotdb_version }} 集群升级完成（{{ iotdb_nodes | length }} 实例）"
+          - "旧版本目录：{{ iotdb_up_current_dist }}（keep_old={{ iotdb_upgrade_keep_old }}）"
+          - "数据目录：{{ iotdb_data_root }} | 单元：iotdb-cn1..cn3 / iotdb-dn1..dn3"

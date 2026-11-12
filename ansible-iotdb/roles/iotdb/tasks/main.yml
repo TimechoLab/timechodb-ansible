@@ -1,0 +1,66 @@
+---
+- name: Java 环境检查
+  ansible.builtin.import_tasks: java.yml
+
+# 1C1D 与 3C3D 共用 iotdb 用户：已存在时不再 usermod（否则另一套实例在跑会失败）
+- name: 创建 iotdb 组
+  ansible.builtin.group:
+    name: "{{ iotdb_group }}"
+    system: true
+
+- name: 读取本地用户库
+  ansible.builtin.getent:
+    database: passwd
+  register: iotdb_passwd_db
+  failed_when: false
+
+- name: 创建 iotdb 用户（不存在时才创建）
+  ansible.builtin.user:
+    name: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    system: true
+    create_home: false
+    home: "{{ iotdb_user_home }}"
+    shell: /usr/sbin/nologin
+  when: iotdb_user not in iotdb_passwd_db.ansible_facts.getent_passwd
+
+- name: 创建安装/数据/日志目录
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    mode: "0755"
+  loop:
+    - "{{ iotdb_install_dir }}"
+    - "{{ iotdb_install_dir }}/packages"
+    - "{{ iotdb_data_dir }}"
+    - "{{ iotdb_log_dir }}"
+
+- name: 获取安装包
+  ansible.builtin.import_tasks: download.yml
+
+- name: 解压安装包
+  ansible.builtin.unarchive:
+    src: "{{ iotdb_package_path }}"
+    dest: "{{ iotdb_install_dir }}"
+    remote_src: true
+    creates: "{{ iotdb_version_dir }}"
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+
+- name: 渲染配置与 systemd 单元
+  ansible.builtin.import_tasks: configure.yml
+
+- name: 启动并设置开机自启
+  ansible.builtin.systemd:
+    name: "{{ iotdb_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: 立即应用配置变更
+  ansible.builtin.meta: flush_handlers
+
+- name: 部署后验证
+  ansible.builtin.import_tasks: verify.yml

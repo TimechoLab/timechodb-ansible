@@ -1,0 +1,29 @@
+---
+- name: "[{{ item.name }}] 停止实例"
+  ansible.builtin.systemd:
+    name: "iotdb-{{ item.name }}"
+    state: stopped
+  failed_when: false
+
+- name: "[{{ item.name }}] 快照旧实例目录并用新版本重建"
+  ansible.builtin.shell: |
+    set -e
+    rm -rf {{ iotdb_nodes_root }}/{{ item.name }}.prev
+    if [ -d {{ iotdb_nodes_root }}/{{ item.name }} ]; then
+      mv {{ iotdb_nodes_root }}/{{ item.name }} {{ iotdb_nodes_root }}/{{ item.name }}.prev
+    fi
+    mkdir -p {{ iotdb_nodes_root }}/{{ item.name }}
+    cp -a {{ iotdb_dist_dir }}/. {{ iotdb_nodes_root }}/{{ item.name }}/
+  args:
+    executable: /bin/bash
+
+- name: "[{{ item.name }}] 写入新版本标记"
+  ansible.builtin.copy:
+    content: "{{ iotdb_version }}\n"
+    dest: "{{ iotdb_nodes_root }}/{{ item.name }}/.iotdb_version"
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    mode: "0644"
+
+- name: "[{{ item.name }}] 重放配置（属性/软链/单元）"
+  ansible.builtin.include_tasks: node.yml

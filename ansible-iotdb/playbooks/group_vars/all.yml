@@ -1,0 +1,52 @@
+---
+# ===== 通用 =====
+timezone: Asia/Shanghai
+dns_interface: ens33
+dns_servers:
+  - 223.5.5.5
+  - 119.29.29.29
+
+base_packages:
+  - curl
+  - wget
+  - git
+  - vim
+  - htop
+  - jq
+  - unzip
+  - rsync
+  - tree
+  - net-tools
+  - lsof
+  - sysstat
+
+# 安全/性能基线
+limits_nofile: 65535
+limits_nproc: 65535
+
+sysctl_settings:
+  vm.swappiness: 10
+  vm.max_map_count: 262144
+  fs.file-max: 2097152
+  net.core.somaxconn: 4096
+  net.ipv4.tcp_tw_reuse: 1
+
+# 是否关闭 swap（数据库场景可置 true）
+common_disable_swap: false
+
+# ===== Docker =====
+docker_packages:
+  - docker.io
+  - docker-compose-v2
+docker_users:
+  - fzw
+# 国内直连 registry-1.docker.io 会超时，使用镜像加速
+docker_registry_mirrors:
+  - https://docker.m.daocloud.io
+  - https://docker.1panel.live
+  - https://dockerproxy.net
+docker_log_max_size: 100m
+docker_log_max_file: "3"
+
+# ===== Java =====
+java_package: openjdk-17-jdk-headless

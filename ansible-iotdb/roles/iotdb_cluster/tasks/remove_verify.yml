@@ -1,0 +1,135 @@
+---
+- name: 收集残留信息
+  block:
+    - name: 单元文件
+      ansible.builtin.stat:
+        path: "/etc/systemd/system/iotdb-{{ node.name }}.service"
+      register: iotdb_v_units
+      loop: "{{ iotdb_nodes }}"
+      loop_control:
+        loop_var: node
+
+    - name: 服务状态
+      ansible.builtin.shell: |
+        for n in {{ iotdb_nodes | map(attribute='name') | join(' ') }}; do
+          printf '%s=%s\n' "$n" "$(systemctl is-active iotdb-$n 2>/dev/null || true)"
+        done
+      args:
+        executable: /bin/bash
+      register: iotdb_v_active
+      changed_when: false
+
+    - name: 残留进程
+      ansible.builtin.shell: pgrep -af 'iotdb[-]cluster/nodes' || true
+      register: iotdb_v_procs
+      changed_when: false
+
+    - name: 计算端口清单
+      ansible.builtin.set_fact:
+        iotdb_v_ports_list: >-
+          {{ (iotdb_nodes | selectattr('type', 'equalto', 'confignode')
+              | map(attribute='ports') | map(attribute='cn_internal_port') | list)
+           + (iotdb_nodes | selectattr('type', 'equalto', 'datanode')
+              | map(attribute='ports') | map(attribute='dn_rpc_port') | list)
+           + [18080] }}
+
+    - name: 监听端口
+      ansible.builtin.shell: |
+        ss -tln | awk 'NR>1 {print $4}' | grep -E ':({{ iotdb_v_ports_list | join('|') }})$' || true
+      args:
+        executable: /bin/bash
+      register: iotdb_v_ports
+      changed_when: false
+
+    - name: 目录残留
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: iotdb_v_paths
+      loop:
+        - "{{ iotdb_cluster_root }}"
+        - "{{ iotdb_data_root }}"
+        - "{{ iotdb_log_root }}"
+
+    - name: 用户/组
+      ansible.builtin.command: getent {{ item }} {{ iotdb_user }}
+      register: iotdb_v_accounts
+      changed_when: false
+      failed_when: false
+      loop:
+        - passwd
+        - group
+
+- name: 断言：6 个单元文件已删除
+  ansible.builtin.assert:
+    that:
+      - iotdb_v_units.results | selectattr('stat.exists') | list | length == 0
+    fail_msg: "仍有单元文件：{{ iotdb_v_units.results | selectattr('stat.exists') | map(attribute='item.name') | list }}"
+    success_msg: "6 个 systemd 单元文件均已删除"
+
+# 注意：不能用 "'active' not in stdout"，inactive 里也含 active 子串
+- name: 断言：无实例处于 active
+  ansible.builtin.assert:
+    that:
+      - iotdb_v_active.stdout | regex_findall('=active') | length == 0
+    fail_msg: "仍有实例在运行：{{ iotdb_v_active.stdout }}"
+    success_msg: "所有实例均非 active"
+
+- name: 断言：无残留进程
+  ansible.builtin.assert:
+    that:
+      - iotdb_v_procs.stdout | length == 0
+    fail_msg: "仍有进程：{{ iotdb_v_procs.stdout_lines }}"
+    success_msg: "无残留 IoTDB 进程"
+
+- name: 断言：端口全部关闭
+  ansible.builtin.assert:
+    that:
+      - iotdb_v_ports.stdout | length == 0
+    fail_msg: "端口仍在监听：{{ iotdb_v_ports.stdout_lines }}"
+    success_msg: "{{ iotdb_v_ports_list | join('/') }} 均未监听"
+
+- name: 断言：集群根目录已删除
+  ansible.builtin.assert:
+    that:
+      - not iotdb_v_paths.results[0].stat.exists
+    fail_msg: "{{ iotdb_cluster_root }} 仍存在"
+    success_msg: "{{ iotdb_cluster_root }} 已删除"
+  when: iotdb_remove_install | bool
+
+- name: 断言：数据目录已删除
+  ansible.builtin.assert:
+    that:
+      - not iotdb_v_paths.results[1].stat.exists
+    fail_msg: "{{ iotdb_data_root }} 仍存在"
+    success_msg: "{{ iotdb_data_root }} 已删除"
+  when: iotdb_remove_data | bool
+
+- name: 断言：日志目录已删除
+  ansible.builtin.assert:
+    that:
+      - not iotdb_v_paths.results[2].stat.exists
+    fail_msg: "{{ iotdb_log_root }} 仍存在"
+    success_msg: "{{ iotdb_log_root }} 已删除"
+  when: iotdb_remove_logs | bool
+
+- name: 断言：用户与组已删除
+  ansible.builtin.assert:
+    that:
+      - iotdb_v_accounts.results[0].rc != 0
+      - iotdb_v_accounts.results[1].rc != 0
+    fail_msg: "用户/组仍存在：{{ iotdb_v_accounts.results | map(attribute='stdout') | list }}"
+    success_msg: "iotdb 用户与组已删除"
+  when:
+    - iotdb_remove_user | bool
+    - not (iotdb_single_instance_dir is exists)
+
+- name: 删除验证汇总
+  ansible.builtin.debug:
+    msg:
+      - "单元文件: {{ iotdb_v_units.results | selectattr('stat.exists') | list | length }} 个残留"
+      - "服务状态: {{ iotdb_v_active.stdout_lines | join(' ') }}"
+      - "残留进程: {{ iotdb_v_procs.stdout_lines | default([]) | length }} 个"
+      - "监听端口: {{ iotdb_v_ports.stdout_lines | default([]) | length }} 个"
+      - "目录: {{ iotdb_cluster_root }}={{ iotdb_v_paths.results[0].stat.exists }}, {{ iotdb_data_root }}={{ iotdb_v_paths.results[1].stat.exists }}, {{ iotdb_log_root }}={{ iotdb_v_paths.results[2].stat.exists }}"
+      - "用户/组: {{ '已删除' if iotdb_v_accounts.results[0].rc != 0 else '仍存在' }}"
+      - "结论: Apache IoTDB 3C3D 集群已彻底删除"
