@@ -1,0 +1,118 @@
+---
+- name: "[{{ item.name }}] 创建实例与数据/日志目录"
+  ansible.builtin.file:
+    path: "{{ dir }}"
+    state: directory
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    mode: "0755"
+  loop:
+    - "{{ iotdb_nodes_root }}/{{ item.name }}"
+    - "{{ iotdb_data_root }}/{{ item.name }}"
+    - "{{ iotdb_log_root }}/{{ item.name }}"
+  loop_control:
+    loop_var: dir
+
+- name: "[{{ item.name }}] 检查实例目录与已装版本"
+  ansible.builtin.stat:
+    path: "{{ iotdb_nodes_root }}/{{ item.name }}/.iotdb_version"
+  register: iotdb_inst_marker
+
+- name: "[{{ item.name }}] 读取已安装版本"
+  ansible.builtin.slurp:
+    src: "{{ iotdb_nodes_root }}/{{ item.name }}/.iotdb_version"
+  register: iotdb_inst_version
+  when: iotdb_inst_marker.stat.exists
+
+- name: "[{{ item.name }}] 首次安装：复制发行包为实例目录"
+  ansible.builtin.command: cp -a {{ iotdb_dist_dir }}/. {{ iotdb_nodes_root }}/{{ item.name }}/
+  args:
+    creates: "{{ iotdb_nodes_root }}/{{ item.name }}/sbin"
+  when: not iotdb_inst_marker.stat.exists
+
+- name: "[{{ item.name }}] 版本变更：重建实例目录（保留 /var/lib 数据）"
+  ansible.builtin.shell: |
+    systemctl stop iotdb-{{ item.name }} >/dev/null 2>&1 || true
+    rm -rf {{ iotdb_nodes_root }}/{{ item.name }}
+    mkdir -p {{ iotdb_nodes_root }}/{{ item.name }}
+    cp -a {{ iotdb_dist_dir }}/. {{ iotdb_nodes_root }}/{{ item.name }}/
+  args:
+    executable: /bin/bash
+  when:
+    - iotdb_inst_marker.stat.exists
+    - (iotdb_inst_version.content | b64decode | trim) != iotdb_version
+  notify: restart iotdb cluster
+
+- name: "[{{ item.name }}] 记录已装版本"
+  ansible.builtin.copy:
+    content: "{{ iotdb_version }}\n"
+    dest: "{{ iotdb_nodes_root }}/{{ item.name }}/.iotdb_version"
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    mode: "0644"
+
+- name: "[{{ item.name }}] 修正属主"
+  ansible.builtin.file:
+    path: "{{ iotdb_nodes_root }}/{{ item.name }}"
+    state: directory
+    recurse: true
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    follow: false
+
+- name: "[{{ item.name }}] data/logs 指向持久目录"
+  ansible.builtin.file:
+    src: "{{ link.src }}"
+    dest: "{{ iotdb_nodes_root }}/{{ item.name }}/{{ link.dst }}"
+    state: link
+    force: true
+  loop:
+    - { src: "{{ iotdb_data_root }}/{{ item.name }}", dst: data }
+    - { src: "{{ iotdb_log_root }}/{{ item.name }}", dst: logs }
+  loop_control:
+    loop_var: link
+
+- name: "[{{ item.name }}] 计算本节点生效配置"
+  ansible.builtin.set_fact:
+    iotdb_node_props: "{{ iotdb_system_properties
+      | combine(iotdb_system_properties_extra)
+      | combine(item.ports | default({}))
+      | combine(item.extra | default({}))
+      | combine({'cn_internal_address': iotdb_rpc_address} if item.type == 'confignode'
+                else {'dn_rpc_address': iotdb_rpc_address, 'dn_internal_address': iotdb_rpc_address}) }}"
+
+- name: "[{{ item.name }}] 写入 iotdb-system.properties"
+  ansible.builtin.lineinfile:
+    path: "{{ iotdb_nodes_root }}/{{ item.name }}/conf/iotdb-system.properties"
+    regexp: "^{{ prop.key }}="
+    line: "{{ prop.key }}={{ prop.value }}"
+  loop: "{{ iotdb_node_props | dict2items }}"
+  loop_control:
+    loop_var: prop
+    label: "{{ prop.key }}"
+  notify: restart iotdb cluster
+
+- name: "[{{ item.name }}] 读取配置文件"
+  ansible.builtin.slurp:
+    src: "{{ iotdb_nodes_root }}/{{ item.name }}/conf/iotdb-system.properties"
+  register: iotdb_node_conf
+
+- name: "[{{ item.name }}] 断言变量已写入 iotdb-system.properties"
+  ansible.builtin.assert:
+    that:
+      - (prop.key + '=' + (prop.value | string)) in (iotdb_node_conf.content | b64decode)
+    fail_msg: "{{ item.name }} 配置未落地: {{ prop.key }}={{ prop.value }}"
+    success_msg: "{{ item.name }}: {{ prop.key }}={{ prop.value }}"
+  loop: "{{ iotdb_node_props | dict2items }}"
+  loop_control:
+    loop_var: prop
+    label: "{{ prop.key }}"
+
+- name: "[{{ item.name }}] 部署 systemd 单元"
+  ansible.builtin.template:
+    src: iotdb-instance.service.j2
+    dest: "/etc/systemd/system/iotdb-{{ item.name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart iotdb cluster

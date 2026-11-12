@@ -1,0 +1,86 @@
+---
+- name: 检查 1C1D 实例是否在运行
+  ansible.builtin.command: systemctl is-active iotdb
+  register: iotdb_single_state
+  changed_when: false
+  failed_when: false
+
+# 1C1D 默认占 6667 / 10710，与集群 cn1/dn1 冲突，提前给出可操作的报错
+- name: 与 1C1D 实例的端口冲突检查
+  ansible.builtin.assert:
+    that:
+      - iotdb_single_state.stdout | trim != 'active'
+    fail_msg: >-
+      检测到 1C1D 实例（iotdb.service）仍在运行，会占用 6667/10710 等默认端口。
+      请先执行 systemctl stop iotdb，或把 iotdb_nodes 里的端口整体偏移后重跑。
+    success_msg: "无 1C1D 实例占用默认端口"
+
+- name: Java 环境与版本校验
+  ansible.builtin.import_tasks: java.yml
+
+- name: 创建 iotdb 组
+  ansible.builtin.group:
+    name: "{{ iotdb_group }}"
+    system: true
+
+# 1C1D 与 3C3D 共用 iotdb 用户：用户已存在时不再 usermod，
+# 否则另一套实例在跑时 usermod 会报 "user is currently used by process"
+- name: 读取本地用户库
+  ansible.builtin.getent:
+    database: passwd
+  register: iotdb_passwd_db
+  failed_when: false
+
+- name: 创建 iotdb 用户（不存在时才创建）
+  ansible.builtin.user:
+    name: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    system: true
+    create_home: false
+    home: "{{ iotdb_user_home }}"
+    shell: /usr/sbin/nologin
+  when: iotdb_user not in iotdb_passwd_db.ansible_facts.getent_passwd
+
+- name: 创建集群根目录
+  ansible.builtin.file:
+    path: "{{ dir }}"
+    state: directory
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+    mode: "0755"
+  loop:
+    - "{{ iotdb_cluster_root }}"
+    - "{{ iotdb_cluster_root }}/packages"
+    - "{{ iotdb_nodes_root }}"
+    - "{{ iotdb_data_root }}"
+    - "{{ iotdb_log_root }}"
+  loop_control:
+    loop_var: dir
+
+- name: 获取安装包
+  ansible.builtin.import_tasks: download.yml
+
+- name: 解压发行包（集群共用一份模板）
+  ansible.builtin.unarchive:
+    src: "{{ iotdb_package_path }}"
+    dest: "{{ iotdb_cluster_root }}"
+    remote_src: true
+    creates: "{{ iotdb_dist_dir }}"
+    owner: "{{ iotdb_user }}"
+    group: "{{ iotdb_group }}"
+
+- name: 逐节点部署实例
+  ansible.builtin.include_tasks: node.yml
+  loop: "{{ iotdb_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 重载 systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: 启动集群
+  ansible.builtin.include_tasks: start.yml
+
+- name: 集群部署后验证
+  ansible.builtin.include_tasks: verify.yml

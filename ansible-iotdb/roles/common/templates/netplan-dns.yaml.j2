@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# 关闭 DHCP 下发的 DNS（网关 192.168.100.1 会把部分域名解析到自己），改用公共 DNS
+network:
+  version: 2
+  ethernets:
+    {{ dns_interface }}:
+      dhcp4: true
+      dhcp4-overrides:
+        use-dns: false
+      nameservers:
+        addresses: [{{ dns_servers | join(', ') }}]

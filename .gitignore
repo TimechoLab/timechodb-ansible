@@ -1,0 +1,6 @@
+﻿# IDE / build artifacts
+.idea/
+*.iml
+dist/
+.DS_Store
+

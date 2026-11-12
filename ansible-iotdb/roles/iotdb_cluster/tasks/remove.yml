@@ -1,0 +1,125 @@
+---
+- name: 逆序停止并禁用所有实例（DN 先、CN 后）
+  ansible.builtin.systemd:
+    name: "iotdb-{{ node.name }}"
+    state: stopped
+    enabled: false
+  loop: "{{ iotdb_nodes | reverse | list }}"
+  loop_control:
+    loop_var: node
+  failed_when: false
+
+- name: 清理 systemd 失败状态
+  ansible.builtin.command: systemctl reset-failed iotdb-{{ item.name }}.service
+  loop: "{{ iotdb_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  failed_when: false
+  changed_when: false
+
+- name: 检查 systemd 单元文件
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/iotdb-{{ item.name }}.service"
+  register: iotdb_rm_units
+  loop: "{{ iotdb_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 删除 systemd 单元文件
+  ansible.builtin.file:
+    path: "/etc/systemd/system/iotdb-{{ item.name }}.service"
+    state: absent
+  loop: "{{ iotdb_nodes }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 重载 systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# 用 "iotdb[-]cluster" 这种写法避免 pkill/pgrep 匹配到本条命令自身
+- name: 查找残留 IoTDB 集群进程
+  ansible.builtin.shell: pgrep -af 'iotdb[-]cluster/nodes' || true
+  register: iotdb_rm_procs
+  changed_when: false
+
+- name: 输出残留进程
+  ansible.builtin.debug:
+    msg: "{{ iotdb_rm_procs.stdout_lines | default([]) }}"
+
+- name: 终止残留进程（先 TERM 后 KILL）
+  ansible.builtin.shell: |
+    set +e
+    pkill -TERM -f 'iotdb[-]cluster/nodes'
+    for i in $(seq 1 20); do
+      pgrep -f 'iotdb[-]cluster/nodes' >/dev/null || break
+      sleep 2
+    done
+    pkill -KILL -f 'iotdb[-]cluster/nodes'
+    exit 0
+  args:
+    executable: /bin/bash
+  when: iotdb_rm_procs.stdout | length > 0
+  changed_when: true
+
+- name: 计算需要释放的端口
+  ansible.builtin.set_fact:
+    iotdb_rm_ports: >-
+      {{ (iotdb_nodes | selectattr('type', 'equalto', 'confignode')
+          | map(attribute='ports') | map(attribute='cn_internal_port') | list)
+       + (iotdb_nodes | selectattr('type', 'equalto', 'datanode')
+          | map(attribute='ports') | map(attribute='dn_rpc_port') | list)
+       + [18080] }}
+
+- name: 等待端口释放 {{ iotdb_rm_ports | join(',') }}
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ item }}"
+    state: stopped
+    timeout: 60
+  loop: "{{ iotdb_rm_ports }}"
+  failed_when: false
+
+- name: 检查 1C1D 实例是否仍在（决定能否删除 iotdb 用户）
+  ansible.builtin.stat:
+    path: "{{ iotdb_single_instance_dir }}"
+  register: iotdb_rm_single
+
+- name: 删除集群根目录（6 个实例 + 共用发行包 + 安装包）
+  ansible.builtin.file:
+    path: "{{ iotdb_cluster_root }}"
+    state: absent
+  when: iotdb_remove_install | bool
+
+- name: 删除数据目录
+  ansible.builtin.file:
+    path: "{{ iotdb_data_root }}"
+    state: absent
+  when: iotdb_remove_data | bool
+
+- name: 删除日志目录
+  ansible.builtin.file:
+    path: "{{ iotdb_log_root }}"
+    state: absent
+  when: iotdb_remove_logs | bool
+
+- name: 跳过删除 iotdb 用户（1C1D 实例仍在）
+  ansible.builtin.debug:
+    msg: "{{ iotdb_single_instance_dir }} 仍存在，保留 iotdb 用户供 1C1D 使用"
+  when: iotdb_remove_user | bool and iotdb_rm_single.stat.exists
+
+- name: 删除 iotdb 用户
+  ansible.builtin.user:
+    name: "{{ iotdb_user }}"
+    state: absent
+    remove: true
+  when: iotdb_remove_user | bool and not iotdb_rm_single.stat.exists
+
+- name: 删除 iotdb 组
+  ansible.builtin.group:
+    name: "{{ iotdb_group }}"
+    state: absent
+  when: iotdb_remove_user | bool and not iotdb_rm_single.stat.exists
+
+- name: 卸载完成，开始验证
+  ansible.builtin.import_tasks: remove_verify.yml

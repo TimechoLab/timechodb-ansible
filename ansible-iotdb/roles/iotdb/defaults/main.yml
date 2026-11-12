@@ -1,0 +1,82 @@
+---
+# ===== 版本与下载 =====
+iotdb_version: "2.0.11"
+iotdb_mirror: "https://mirrors.tuna.tsinghua.edu.cn/apache/iotdb"
+iotdb_mirror_fallback: "https://archive.apache.org/dist/iotdb"
+iotdb_archive: "apache-iotdb-{{ iotdb_version }}-all-bin.zip"
+
+# ===== 路径 =====
+iotdb_install_dir: /opt/iotdb
+iotdb_current: "{{ iotdb_install_dir }}/current"
+iotdb_version_dir: "{{ iotdb_install_dir }}/apache-iotdb-{{ iotdb_version }}-all-bin"
+iotdb_package_path: "{{ iotdb_install_dir }}/packages/{{ iotdb_archive }}"
+iotdb_data_dir: /var/lib/iotdb
+iotdb_log_dir: /var/log/iotdb
+
+# ===== 系统用户 =====
+iotdb_user: iotdb
+iotdb_group: iotdb
+iotdb_user_home: /var/lib/iotdb
+iotdb_service_name: iotdb
+
+# ===== 网络 =====
+iotdb_rpc_address: "{{ ansible_default_ipv4.address | default('127.0.0.1') }}"
+iotdb_rpc_port: 6667
+iotdb_cn_internal_port: 10710
+iotdb_enable_rest: true
+iotdb_rest_port: 18080
+
+# ===== 资源 =====
+iotdb_memory_cn: 1G
+iotdb_memory_dn: 2G
+
+# ===== 其他 =====
+iotdb_java_home: ""
+iotdb_root_password: root
+
+# =====================================================================
+# iotdb-system.properties 配置项
+#   * 键名与 conf/iotdb-system.properties 完全一致
+#   * 默认值取自 2.0.11 发行包（活跃配置 + 模板中的 REST 项）
+#   * 直接改这里的值即可；临时覆盖不改文件用 iotdb_system_properties_extra
+#     例：-e '{"iotdb_system_properties_extra": {"dn_rpc_port": 6668}}'
+# =====================================================================
+iotdb_system_properties:
+  # --- 集群 ---
+  cluster_name: defaultCluster
+  cn_seed_config_node: "127.0.0.1:{{ iotdb_cn_internal_port }}"
+  dn_seed_config_node: "127.0.0.1:{{ iotdb_cn_internal_port }}"
+  # --- 节点 RPC ---
+  cn_internal_address: 127.0.0.1
+  cn_internal_port: "{{ iotdb_cn_internal_port }}"
+  cn_consensus_port: 10720
+  dn_rpc_address: "{{ iotdb_rpc_address }}"
+  dn_rpc_port: "{{ iotdb_rpc_port }}"
+  dn_internal_address: 127.0.0.1
+  dn_internal_port: 10730
+  dn_mpp_data_exchange_port: 10740
+  dn_schema_region_consensus_port: 10750
+  dn_data_region_consensus_port: 10760
+  # --- 副本 ---
+  schema_replication_factor: 1
+  data_replication_factor: 1
+  # --- 指标 ---
+  cn_metric_prometheus_reporter_port: 9091
+  dn_metric_prometheus_reporter_port: 9092
+  # --- REST 服务 ---
+  enable_rest_service: "{{ iotdb_enable_rest | bool | lower }}"
+  rest_service_port: "{{ iotdb_rest_port }}"
+
+# 追加/覆盖 iotdb_system_properties 的临时字典（不写进文件也能覆盖）
+iotdb_system_properties_extra: {}
+
+# ===== 升级（upgrade.yml）=====
+iotdb_allow_downgrade: false      # 目标版本低于当前版本时，需显式置 true
+iotdb_upgrade_keep_old: true      # 保留旧版本目录，便于回滚/对比
+iotdb_upgrade_min_free_gb: 2      # 升级前磁盘余量下限
+
+# ===== 卸载（remove.yml）开关：默认"彻底删除" =====
+iotdb_remove_install: true    # 删除 /opt/iotdb（含安装包缓存）
+iotdb_remove_data: true       # 删除 /var/lib/iotdb
+iotdb_remove_logs: true       # 删除 /var/log/iotdb
+iotdb_remove_user: true       # 删除 iotdb 用户/组

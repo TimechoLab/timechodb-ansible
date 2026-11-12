@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Apache IoTDB {{ iotdb_version }} 1C1D (1 ConfigNode + 1 DataNode)
+Documentation=https://iotdb.apache.org/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ iotdb_user }}
+Group={{ iotdb_group }}
+Environment=IOTDB_HOME={{ iotdb_current }}
+Environment=JAVA_HOME={{ iotdb_java_home }}
+Environment=CN_PORT={{ iotdb_effective_properties.cn_internal_port | default(iotdb_cn_internal_port) }}
+LimitNOFILE=65535
+ExecStart=/usr/local/bin/iotdb-start.sh
+TimeoutStartSec=0
+TimeoutStopSec=300
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

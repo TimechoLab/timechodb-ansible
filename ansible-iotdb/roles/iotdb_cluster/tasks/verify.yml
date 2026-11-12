@@ -1,0 +1,127 @@
+---
+- name: 等待待处理的配置变更生效
+  ansible.builtin.meta: flush_handlers
+
+- name: 全部实例服务状态
+  ansible.builtin.systemd:
+    name: "iotdb-{{ node.name }}"
+  register: iotdb_cluster_services
+  changed_when: false
+  loop: "{{ iotdb_nodes }}"
+  loop_control:
+    loop_var: node
+
+- name: 断言 6 个实例均为 active
+  ansible.builtin.assert:
+    that:
+      - iotdb_cluster_services.results | map(attribute='status.ActiveState') | select('ne', 'active') | list | length == 0
+    fail_msg: "存在未启动实例：{{ iotdb_cluster_services.results | map(attribute='status.ActiveState') | list }}"
+    success_msg: "{{ iotdb_nodes | length }} 个实例全部 active"
+
+- name: 等待 ConfigNode 端口
+  ansible.builtin.wait_for:
+    host: "{{ iotdb_rpc_address }}"
+    port: "{{ node.ports.cn_internal_port }}"
+    timeout: 240
+    delay: 5
+  loop: "{{ iotdb_nodes | selectattr('type', 'equalto', 'confignode') | list }}"
+  loop_control:
+    loop_var: node
+
+- name: 等待 DataNode RPC 端口
+  ansible.builtin.wait_for:
+    host: "{{ iotdb_rpc_address }}"
+    port: "{{ node.ports.dn_rpc_port }}"
+    timeout: 300
+    delay: 5
+  loop: "{{ iotdb_nodes | selectattr('type', 'equalto', 'datanode') | list }}"
+  loop_control:
+    loop_var: node
+
+- name: 查询集群拓扑
+  ansible.builtin.shell: |
+    set -o pipefail
+    printf 'show cluster\n' | {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh \
+      -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_cluster_raw
+  changed_when: false
+  retries: 25
+  delay: 6
+  until: iotdb_cluster_raw.stdout | regex_findall('Running') | length >= 6
+
+- name: 输出集群拓扑
+  ansible.builtin.debug:
+    var: iotdb_cluster_raw.stdout_lines
+
+- name: 统计节点数
+  ansible.builtin.set_fact:
+    iotdb_cn_count: "{{ iotdb_cluster_raw.stdout | regex_findall('ConfigNode') | length }}"
+    iotdb_dn_count: "{{ iotdb_cluster_raw.stdout | regex_findall('DataNode') | length }}"
+    iotdb_running_count: "{{ iotdb_cluster_raw.stdout | regex_findall('Running') | length }}"
+
+- name: 断言 3C3D 且全部 Running
+  ansible.builtin.assert:
+    that:
+      - iotdb_cn_count | int == iotdb_expect_cn | int
+      - iotdb_dn_count | int == iotdb_expect_dn | int
+      - iotdb_running_count | int >= (iotdb_expect_cn | int + iotdb_expect_dn | int)
+    fail_msg: "集群拓扑不符：CN={{ iotdb_cn_count }}, DN={{ iotdb_dn_count }}, Running={{ iotdb_running_count }}"
+    success_msg: "{{ iotdb_expect_cn }}C{{ iotdb_expect_dn }}D 就绪：{{ iotdb_running_count }} 个节点 Running"
+
+- name: 创建冒烟数据库
+  ansible.builtin.shell: |
+    printf 'CREATE DATABASE root.ansible_smoke\n' | {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh \
+      -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_create_db
+  changed_when: false
+  failed_when: false
+
+- name: 写入一条数据（经过集群路由）
+  ansible.builtin.shell: |
+    TS=$(($(date +%s) * 1000))
+    printf 'INSERT INTO root.ansible_smoke.d1(timestamp, s1) VALUES (%s, 42.0)\n' "$TS" | \
+      {{ iotdb_nodes_root }}/dn1/sbin/start-cli.sh -h {{ iotdb_rpc_address }} -p 6667 -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_insert
+  changed_when: false
+
+- name: 从另一台 DataNode 读取
+  ansible.builtin.shell: |
+    printf 'SELECT s1 FROM root.ansible_smoke.d1\n' | {{ iotdb_nodes_root }}/dn2/sbin/start-cli.sh \
+      -h {{ iotdb_rpc_address }} -p 6668 -u root -pw {{ iotdb_root_password }} 2>&1
+  args:
+    executable: /bin/bash
+  register: iotdb_select
+  changed_when: false
+  failed_when: false
+
+- name: 断言跨节点写读（dn1 写、dn2 读）
+  ansible.builtin.assert:
+    that:
+      - "'42.0' in iotdb_select.stdout"
+    fail_msg: "跨节点读写失败。insert={{ iotdb_insert.stdout }} select={{ iotdb_select.stdout }}"
+    success_msg: "跨节点写读正常：dn1 写入，dn2 读回 42.0"
+
+- name: 检查 DataNode1 REST 服务
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ iotdb_system_properties.rest_service_port }}/ping"
+    status_code: 200
+  register: iotdb_rest_ping
+  retries: 10
+  delay: 3
+  until: iotdb_rest_ping.status == 200
+  when: iotdb_verify_rest | bool
+
+- name: 汇总
+  ansible.builtin.debug:
+    msg:
+      - "Apache IoTDB {{ iotdb_version }} {{ iotdb_expect_cn }}C{{ iotdb_expect_dn }}D 就绪（单机多实例）"
+      - "ConfigNode: {{ iotdb_rpc_address }}:10710/10711/10712 | DataNode RPC: 6667/6668/6669"
+      - "副本: schema={{ iotdb_system_properties.schema_replication_factor }}, data={{ iotdb_system_properties.data_replication_factor }}"
+      - "实例目录 {{ iotdb_nodes_root }} | 数据 {{ iotdb_data_root }} | 日志 {{ iotdb_log_root }}"
+      - "单实例单元: systemctl {status,stop,start} iotdb-cn1 / iotdb-dn1 ..."

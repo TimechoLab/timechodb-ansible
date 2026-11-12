@@ -1,0 +1,114 @@
+---
+# ===== 版本与下载 =====
+iotdb_version: "2.0.11"
+iotdb_mirror: "https://mirrors.tuna.tsinghua.edu.cn/apache/iotdb"
+iotdb_mirror_fallback: "https://archive.apache.org/dist/iotdb"
+iotdb_archive: "apache-iotdb-{{ iotdb_version }}-all-bin.zip"
+
+# ===== 路径 =====
+iotdb_cluster_root: /opt/iotdb-cluster
+iotdb_dist_dir: "{{ iotdb_cluster_root }}/apache-iotdb-{{ iotdb_version }}-all-bin"
+iotdb_package_path: "{{ iotdb_cluster_root }}/packages/{{ iotdb_archive }}"
+iotdb_nodes_root: "{{ iotdb_cluster_root }}/nodes"
+iotdb_data_root: /var/lib/iotdb-cluster
+iotdb_log_root: /var/log/iotdb-cluster
+
+# ===== 系统用户 =====
+iotdb_user: iotdb
+iotdb_group: iotdb
+iotdb_user_home: /var/lib/iotdb
+
+# ===== 网络 =====
+# 集群内节点必须互相可达，因此绑定主机网卡地址而不是 127.0.0.1
+iotdb_rpc_address: "{{ ansible_default_ipv4.address | default('127.0.0.1') }}"
+iotdb_seed_host: "{{ iotdb_rpc_address }}"
+iotdb_seed_cn_port: 10710
+
+# ===== 资源（单机 6 实例，堆内存要压住）=====
+iotdb_cn_memory: 512M
+iotdb_dn_memory: 768M
+
+# =====================================================================
+# iotdb-system.properties 公共配置（键名与配置文件一致）
+# 每个节点在此基础上叠加自己的端口（iotdb_nodes[].ports）和额外项（extra）
+# 临时覆盖：-e '{"iotdb_system_properties_extra": {"cluster_name": "x"}}'
+# =====================================================================
+iotdb_system_properties:
+  cluster_name: cluster_3c3d
+  cn_seed_config_node: "{{ iotdb_seed_host }}:{{ iotdb_seed_cn_port }}"
+  dn_seed_config_node: "{{ iotdb_seed_host }}:{{ iotdb_seed_cn_port }}"
+  schema_replication_factor: 3
+  data_replication_factor: 3
+  enable_rest_service: "false"
+  rest_service_port: 18080
+iotdb_system_properties_extra: {}
+
+# ===== 节点清单：3 ConfigNode + 3 DataNode（单机多实例，端口错开）=====
+iotdb_nodes:
+  - name: cn1
+    type: confignode
+    ports:
+      cn_internal_port: 10710
+      cn_consensus_port: 10720
+      cn_metric_prometheus_reporter_port: 9091
+  - name: cn2
+    type: confignode
+    ports:
+      cn_internal_port: 10711
+      cn_consensus_port: 10721
+      cn_metric_prometheus_reporter_port: 9092
+  - name: cn3
+    type: confignode
+    ports:
+      cn_internal_port: 10712
+      cn_consensus_port: 10722
+      cn_metric_prometheus_reporter_port: 9093
+  - name: dn1
+    type: datanode
+    ports:
+      dn_rpc_port: 6667
+      dn_internal_port: 10730
+      dn_mpp_data_exchange_port: 10740
+      dn_schema_region_consensus_port: 10750
+      dn_data_region_consensus_port: 10760
+      dn_metric_prometheus_reporter_port: 9101
+    extra:
+      enable_rest_service: "true"
+      rest_service_port: 18080
+  - name: dn2
+    type: datanode
+    ports:
+      dn_rpc_port: 6668
+      dn_internal_port: 10731
+      dn_mpp_data_exchange_port: 10741
+      dn_schema_region_consensus_port: 10751
+      dn_data_region_consensus_port: 10761
+      dn_metric_prometheus_reporter_port: 9102
+  - name: dn3
+    type: datanode
+    ports:
+      dn_rpc_port: 6669
+      dn_internal_port: 10732
+      dn_mpp_data_exchange_port: 10742
+      dn_schema_region_consensus_port: 10752
+      dn_data_region_consensus_port: 10762
+      dn_metric_prometheus_reporter_port: 9103
+
+# ===== 校验参数 =====
+iotdb_expect_cn: 3
+iotdb_expect_dn: 3
+iotdb_root_password: root
+iotdb_verify_rest: true
+
+# ===== 升级（upgrade.yml）=====
+iotdb_allow_downgrade: false      # 目标版本低于当前时需显式置 true
+iotdb_upgrade_keep_old: true      # 保留旧版本发行包目录（实例快照验证成功后会删除）
+iotdb_upgrade_min_free_gb: 2      # 升级前磁盘余量下限（GB）
+
+# ===== 卸载（remove.yml）开关：默认"彻底删除" =====
+iotdb_remove_install: true    # 删除 /opt/iotdb-cluster（含 6 个实例目录与安装包）
+iotdb_remove_data: true       # 删除 /var/lib/iotdb-cluster
+iotdb_remove_logs: true       # 删除 /var/log/iotdb-cluster
+iotdb_remove_user: true       # 删除 iotdb 用户/组（若 1C1D 实例仍在则自动跳过）
+# 1C1D 的安装目录，用于判断 iotdb 用户是否还被别的实例依赖
+iotdb_single_instance_dir: /opt/iotdb

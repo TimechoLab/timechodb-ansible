@@ -1,0 +1,7 @@
+---
+- name: Apache IoTDB 3C3D 集群部署与验证
+  hosts: ubuntu
+  become: true
+  gather_facts: true
+  roles:
+    - { role: iotdb_cluster, tags: [iotdb_cluster] }

@@ -1,0 +1,23 @@
+---
+- name: 环境校验
+  hosts: ubuntu
+  become: true
+  gather_facts: false
+  tasks:
+    - name: 收集关键信息
+      ansible.builtin.shell: |
+        echo "os      : $(. /etc/os-release; echo $PRETTY_NAME)"
+        echo "kernel  : $(uname -r)"
+        echo "docker  : $(docker --version 2>/dev/null || echo missing)"
+        echo "compose : $(docker compose version 2>/dev/null || echo missing)"
+        echo "docker  : $(systemctl is-active docker)"
+        echo "java    : $(java -version 2>&1 | head -1)"
+        echo "tz      : $(timedatectl show -p Timezone --value)"
+        echo "dns     : $(resolvectl status ens33 2>/dev/null | awk -F': ' '/Current DNS Server/{print $2}')"
+        echo "nofile  : $(ulimit -n)"
+      register: facts_out
+      changed_when: false
+
+    - name: 输出
+      ansible.builtin.debug:
+        var: facts_out.stdout_lines

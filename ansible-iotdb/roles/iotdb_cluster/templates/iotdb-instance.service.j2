@@ -1,0 +1,22 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Apache IoTDB {{ iotdb_version }} {{ item.type }} {{ item.name }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# start-*-node.sh 默认前台运行（exec java），因此用 simple 由 systemd 直接托管 JVM
+Type=simple
+User={{ iotdb_user }}
+Group={{ iotdb_group }}
+Environment=IOTDB_HOME={{ iotdb_nodes_root }}/{{ item.name }}
+Environment=JAVA_HOME={{ iotdb_java_home }}
+Environment=MEMORY_SIZE={{ iotdb_cn_memory if item.type == 'confignode' else iotdb_dn_memory }}
+LimitNOFILE=65535
+ExecStart={{ iotdb_nodes_root }}/{{ item.name }}/sbin/start-{{ 'confignode' if item.type == 'confignode' else 'datanode' }}.sh
+TimeoutStartSec=0
+TimeoutStopSec=300
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

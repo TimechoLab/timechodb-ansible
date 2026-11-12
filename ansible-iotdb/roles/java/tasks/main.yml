@@ -1,0 +1,34 @@
+---
+- name: 安装 JDK
+  ansible.builtin.apt:
+    name: "{{ java_package }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: 解析 JAVA_HOME
+  ansible.builtin.shell: |
+    set -e
+    dirname "$(dirname "$(readlink -f /usr/bin/java)")"
+  args:
+    executable: /bin/bash
+  register: java_home_cmd
+  changed_when: false
+
+- name: 写入 JAVA_HOME 环境变量
+  ansible.builtin.template:
+    src: java.sh.j2
+    dest: /etc/profile.d/java.sh
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: 校验 java 可用
+  ansible.builtin.command: java -version
+  register: java_ver
+  changed_when: false
+  failed_when: java_ver.rc != 0
+
+- name: 打印 Java 信息
+  ansible.builtin.debug:
+    msg: "JAVA_HOME={{ java_home_cmd.stdout }} | {{ java_ver.stderr | trim }}"

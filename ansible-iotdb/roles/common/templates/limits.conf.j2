@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+*     soft  nofile  {{ limits_nofile }}
+*     hard  nofile  {{ limits_nofile }}
+*     soft  nproc   {{ limits_nproc }}
+*     hard  nproc   {{ limits_nproc }}
+root  soft  nofile  {{ limits_nofile }}
+root  hard  nofile  {{ limits_nofile }}

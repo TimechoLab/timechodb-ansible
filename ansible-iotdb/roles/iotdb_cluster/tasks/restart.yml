@@ -1,0 +1,12 @@
+---
+- name: 逆序停止所有实例
+  ansible.builtin.systemd:
+    name: "iotdb-{{ node.name }}"
+    state: stopped
+  loop: "{{ iotdb_nodes | reverse | list }}"
+  loop_control:
+    loop_var: node
+  failed_when: false
+
+- name: 重新拉起集群
+  ansible.builtin.include_tasks: start.yml

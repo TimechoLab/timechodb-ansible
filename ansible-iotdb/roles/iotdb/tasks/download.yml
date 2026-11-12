@@ -1,0 +1,22 @@
+---
+- name: 下载 Apache IoTDB 安装包
+  block:
+    - name: 从清华镜像下载
+      ansible.builtin.get_url:
+        url: "{{ iotdb_mirror }}/{{ iotdb_version }}/{{ iotdb_archive }}"
+        dest: "{{ iotdb_package_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+        timeout: 60
+  rescue:
+    - name: 主镜像不可用时改用 Apache 归档站
+      ansible.builtin.get_url:
+        url: "{{ iotdb_mirror_fallback }}/{{ iotdb_version }}/{{ iotdb_archive }}"
+        dest: "{{ iotdb_package_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        force: false
+        timeout: 60

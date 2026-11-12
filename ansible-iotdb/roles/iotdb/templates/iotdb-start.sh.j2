@@ -1,0 +1,22 @@
+#!/bin/bash
+# {{ ansible_managed }}
+# 1C1D 启动包装：先拉起 ConfigNode 并等端口就绪，再拉起 DataNode，
+# 避免 start-standalone.sh 里固定 sleep 3 秒导致 DataNode 抢跑到 ConfigNode 之前。
+set -u
+IOTDB_HOME_DIR="${IOTDB_HOME:?IOTDB_HOME not set}"
+CN_PORT="${CN_PORT:-10710}"
+
+"$IOTDB_HOME_DIR/sbin/start-confignode.sh" &
+CN_PID=$!
+
+for _ in $(seq 1 150); do
+  if ss -tln 2>/dev/null | grep -q ":${CN_PORT} "; then
+    break
+  fi
+  sleep 2
+done
+
+"$IOTDB_HOME_DIR/sbin/start-datanode.sh" &
+DN_PID=$!
+
+wait "$CN_PID" "$DN_PID"

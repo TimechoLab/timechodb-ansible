@@ -1,0 +1,32 @@
+# Semaphore UI —— Ansible 的 Web 前端
+# 部署位置：控制节点 /srv/semaphore（示例，按需调整）
+# 访问：http://<host>:3000
+name: semaphore
+
+services:
+  semaphore:
+    image: semaphoreui/semaphore:latest
+    container_name: semaphore
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      TZ: Asia/Shanghai
+      # 单机部署用 sqlite，数据落在 ./data/database.sqlite
+      SEMAPHORE_DB_DIALECT: sqlite
+      SEMAPHORE_ADMIN: ${SEMAPHORE_ADMIN}
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD}
+      SEMAPHORE_ADMIN_NAME: ${SEMAPHORE_ADMIN_NAME}
+      SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL}
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION}
+      # 容器内 git 以 uid 1001 运行，源码目录属于宿主机用户，需放行 ownership 检查
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+    volumes:
+      - ./data:/var/lib/semaphore
+      - ./gitconfig:/etc/gitconfig:ro
+      - ./keys:/opt/keys:ro
+      # playbook 仓库（同步到控制节点的那份，只读挂载）
+      - ${ANSIBLE_DIR:-/srv/ansible}:/opt/ansible:ro

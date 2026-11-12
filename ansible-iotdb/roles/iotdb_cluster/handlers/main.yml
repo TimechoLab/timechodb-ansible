@@ -1,0 +1,3 @@
+---
+- name: restart iotdb cluster
+  ansible.builtin.include_tasks: restart.yml

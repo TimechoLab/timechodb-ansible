@@ -1,0 +1,10 @@
+---
+- name: Apache IoTDB 3C3D 删除结果校验（只读）
+  hosts: ubuntu
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 校验是否已删除
+      ansible.builtin.import_role:
+        name: iotdb_cluster
+        tasks_from: remove_verify.yml

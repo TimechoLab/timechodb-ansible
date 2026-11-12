@@ -1,0 +1,30 @@
+---
+- name: 回滚：停止实例并恢复旧实例目录
+  ansible.builtin.shell: |
+    set +e
+    for n in {{ iotdb_nodes | map(attribute='name') | join(' ') }}; do
+      systemctl stop iotdb-$n >/dev/null 2>&1
+      if [ -d {{ iotdb_nodes_root }}/$n.prev ]; then
+        rm -rf {{ iotdb_nodes_root }}/$n
+        mv {{ iotdb_nodes_root }}/$n.prev {{ iotdb_nodes_root }}/$n
+        echo "restored $n"
+      else
+        echo "no snapshot for $n, skipped"
+      fi
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  register: iotdb_up_rollback
+  changed_when: true
+
+- name: 回滚：输出恢复情况
+  ansible.builtin.debug:
+    msg: "{{ iotdb_up_rollback.stdout_lines }}"
+
+- name: 回滚：重载并启动旧版本集群
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: 回滚：启动
+  ansible.builtin.include_tasks: start.yml

@@ -1,0 +1,25 @@
+---
+- name: 启动 ConfigNode（按清单顺序）
+  ansible.builtin.systemd:
+    name: "iotdb-{{ node.name }}"
+    state: started
+    enabled: true
+  loop: "{{ iotdb_nodes | selectattr('type', 'equalto', 'confignode') | list }}"
+  loop_control:
+    loop_var: node
+
+- name: 等待 seed ConfigNode {{ iotdb_seed_host }}:{{ iotdb_seed_cn_port }}
+  ansible.builtin.wait_for:
+    host: "{{ iotdb_seed_host }}"
+    port: "{{ iotdb_seed_cn_port }}"
+    timeout: 240
+    delay: 5
+
+- name: 启动 DataNode（按清单顺序）
+  ansible.builtin.systemd:
+    name: "iotdb-{{ node.name }}"
+    state: started
+    enabled: true
+  loop: "{{ iotdb_nodes | selectattr('type', 'equalto', 'datanode') | list }}"
+  loop_control:
+    loop_var: node

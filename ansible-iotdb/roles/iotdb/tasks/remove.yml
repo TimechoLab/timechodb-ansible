@@ -1,0 +1,98 @@
+---
+- name: 读取 iotdb 服务状态
+  ansible.builtin.command: systemctl is-active {{ iotdb_service_name }}
+  register: iotdb_rm_active
+  changed_when: false
+  failed_when: false
+
+- name: 检查 systemd 单元文件
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ iotdb_service_name }}.service"
+  register: iotdb_rm_unit
+
+- name: 停止并禁用 iotdb 服务
+  ansible.builtin.systemd:
+    name: "{{ iotdb_service_name }}"
+    state: stopped
+    enabled: false
+  when: iotdb_rm_unit.stat.exists
+  failed_when: false
+
+- name: 删除 systemd 单元文件
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ iotdb_service_name }}.service"
+    state: absent
+  when: iotdb_rm_unit.stat.exists
+
+- name: 重载 systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: 查找残留 IoTDB 进程
+  ansible.builtin.shell: pgrep -af 'org\.apache\.iotdb\.(confignode|db)\.service\.(ConfigNode|DataNode)' || true
+  register: iotdb_rm_procs
+  changed_when: false
+
+- name: 输出残留进程
+  ansible.builtin.debug:
+    msg: "{{ iotdb_rm_procs.stdout_lines | default([]) }}"
+
+- name: 终止残留进程（先 TERM 后 KILL）
+  ansible.builtin.shell: |
+    set +e
+    pkill -TERM -f 'org\.apache\.iotdb\.(confignode|db)\.service\.(ConfigNode|DataNode)'
+    for i in $(seq 1 15); do
+      pgrep -f 'org\.apache\.iotdb\.(confignode|db)\.service\.(ConfigNode|DataNode)' >/dev/null || break
+      sleep 2
+    done
+    pkill -KILL -f 'org\.apache\.iotdb\.(confignode|db)\.service\.(ConfigNode|DataNode)'
+    exit 0
+  args:
+    executable: /bin/bash
+  when: iotdb_rm_procs.stdout | length > 0
+  changed_when: true
+
+- name: 等待端口释放
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ item }}"
+    state: stopped
+    timeout: 60
+  loop:
+    - "{{ iotdb_rpc_port }}"
+    - "{{ iotdb_cn_internal_port }}"
+  failed_when: false
+
+- name: 删除安装目录（含 bin/conf/lib/tools 与安装包缓存）
+  ansible.builtin.file:
+    path: "{{ iotdb_install_dir }}"
+    state: absent
+  when: iotdb_remove_install | bool
+
+- name: 删除数据目录
+  ansible.builtin.file:
+    path: "{{ iotdb_data_dir }}"
+    state: absent
+  when: iotdb_remove_data | bool
+
+- name: 删除日志目录
+  ansible.builtin.file:
+    path: "{{ iotdb_log_dir }}"
+    state: absent
+  when: iotdb_remove_logs | bool
+
+- name: 删除 iotdb 用户
+  ansible.builtin.user:
+    name: "{{ iotdb_user }}"
+    state: absent
+    remove: true
+  when: iotdb_remove_user | bool
+
+- name: 删除 iotdb 组
+  ansible.builtin.group:
+    name: "{{ iotdb_group }}"
+    state: absent
+  when: iotdb_remove_user | bool
+
+- name: 卸载完成，开始验证
+  ansible.builtin.import_tasks: remove_verify.yml

@@ -1,0 +1,10 @@
+---
+- name: Apache IoTDB 3C3D 彻底卸载（含删除验证）
+  hosts: ubuntu
+  become: true
+  gather_facts: true
+  tasks:
+    - name: 执行卸载
+      ansible.builtin.import_role:
+        name: iotdb_cluster
+        tasks_from: remove.yml

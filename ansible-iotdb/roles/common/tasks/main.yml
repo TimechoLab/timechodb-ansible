@@ -1,0 +1,45 @@
+---
+- name: 更新 apt 索引
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: 安装基础软件包
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+
+- name: 设置时区
+  community.general.timezone:
+    name: "{{ timezone }}"
+
+- name: 配置 DNS（netplan drop-in，绕开被劫持的网关 DNS）
+  ansible.builtin.template:
+    src: netplan-dns.yaml.j2
+    dest: /etc/netplan/99-dns-override.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: apply netplan
+
+- name: 配置文件句柄 / 进程数上限
+  ansible.builtin.template:
+    src: limits.conf.j2
+    dest: /etc/security/limits.d/99-ansible-managed.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: 配置内核参数
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    state: present
+    reload: true
+  loop: "{{ sysctl_settings | dict2items }}"
+
+- name: 关闭 swap
+  ansible.builtin.command: swapoff -a
+  when: common_disable_swap | bool
+  changed_when: false
