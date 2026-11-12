@@ -7,7 +7,7 @@ param(
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Extra
 )
 $ErrorActionPreference = 'Stop'
-$Target = 'fzw@192.168.100.103'
+$Target = 'iotdb-admin@iotdb-node1'
 $sshOpts = @('-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=10')
 
 & (Join-Path $PSScriptRoot 'sync.ps1') -Target $Target

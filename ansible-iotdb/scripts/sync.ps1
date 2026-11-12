@@ -1,6 +1,6 @@
-# 将本项目同步到控制节点（Ubuntu VM）的 ~/ansible
+# 将本项目同步到控制节点的 ~/ansible（按需修改 $Target）
 param(
-    [string]$Target = 'fzw@192.168.100.103',
+    [string]$Target = 'iotdb-admin@iotdb-node1',
     [string]$RemoteDir = 'ansible'
 )
 $ErrorActionPreference = 'Stop'
@@ -21,7 +21,7 @@ try {
 
     # Semaphore 从 VM 上的 git 仓库克隆 playbook，所以同步后要提交一次
     $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $commit = "cd ~/" + $RemoteDir + " && git add -A && git -c user.name='Ansible Sync' -c user.email='sync@xiaoxin.local' commit -q -m 'sync " + $stamp + "'"
+    $commit = "cd ~/" + $RemoteDir + " && git add -A && git -c user.name='Ansible Sync' -c user.email='sync@example.com' commit -q -m 'sync " + $stamp + "'"
     ssh @sshOpts $Target $commit 2>&1 | Out-Null
     Write-Host "[sync] committed to git on VM"
 }

@@ -1,6 +1,6 @@
 # Semaphore UI —— Ansible 的 Web 前端
-# 部署位置：VM 上 /home/fzw/semaphore/
-# 访问：http://192.168.100.103:3000
+# 部署位置：控制节点 /srv/semaphore（示例，按需调整）
+# 访问：http://<host>:3000
 name: semaphore
 
 services:
@@ -19,7 +19,7 @@ services:
       SEMAPHORE_ADMIN_NAME: ${SEMAPHORE_ADMIN_NAME}
       SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL}
       SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION}
-      # 容器内 git 以 uid 1001 运行，源码目录属于 fzw，需放行 ownership 检查
+      # 容器内 git 以 uid 1001 运行，源码目录属于宿主机用户，需放行 ownership 检查
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: safe.directory
       GIT_CONFIG_VALUE_0: "*"
@@ -28,5 +28,5 @@ services:
       - ./data:/var/lib/semaphore
       - ./gitconfig:/etc/gitconfig:ro
       - ./keys:/opt/keys:ro
-      # playbook 仓库（Windows 同步过来的那份，只读挂载）
-      - /home/fzw/ansible:/opt/ansible:ro
+      # playbook 仓库（同步到控制节点的那份，只读挂载）
+      - ${ANSIBLE_DIR:-/srv/ansible}:/opt/ansible:ro

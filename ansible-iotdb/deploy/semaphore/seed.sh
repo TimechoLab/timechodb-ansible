@@ -5,8 +5,11 @@ set -euo pipefail
 
 BASE="${1:-http://127.0.0.1:3000}"
 USER="${2:-admin}"
-EMAIL="${3:-admin@xiaoxin.local}"
+EMAIL="${3:-admin@example.com}"
 PW="${4:-}"
+# 目标主机（写进 Semaphore 静态清单；按需覆盖）
+TARGET_HOST="${TARGET_HOST:-127.0.0.1}"
+TARGET_SSH_USER="${TARGET_SSH_USER:-iotdb-admin}"
 JAR=$(mktemp)
 trap 'rm -f "$JAR"' EXIT
 
@@ -23,9 +26,9 @@ api() { curl -s -b "$JAR" -H 'Content-Type: application/json' "$@"; }
 login
 
 # 1) 项目（type 必须给 ansible，否则子资源接口 404）
-PID=$(api "$BASE/api/projects" | jq -r '[.[] | select(.name=="xiaoxin")][0].id // empty')
+PID=$(api "$BASE/api/projects" | jq -r '[.[] | select(.name=="iotdb")][0].id // empty')
 if [ -z "$PID" ]; then
-  PID=$(api -X POST "$BASE/api/projects" -d '{"name":"xiaoxin","alert":true,"max_parallel_tasks":0,"type":"ansible"}' | jq -r '.id')
+  PID=$(api -X POST "$BASE/api/projects" -d '{"name":"iotdb","alert":true,"max_parallel_tasks":0,"type":"ansible"}' | jq -r '.id')
   echo "project created: $PID"
 else
   echo "project exists: $PID"
@@ -40,21 +43,21 @@ if [ -z "$KID" ]; then
 fi
 
 # 3) 静态清单
-INV=$(api "$BASE/api/project/$PID/inventory" | jq -r '[.[] | select(.name=="xiaoxin-static")][0].id // empty')
+INV=$(api "$BASE/api/project/$PID/inventory" | jq -r '[.[] | select(.name=="iotdb-static")][0].id // empty')
 if [ -z "$INV" ]; then
-  cat > /tmp/sem_inv.yml <<'EOF'
+  cat > /tmp/sem_inv.yml <<EOF
 all:
   children:
     ubuntu:
       hosts:
-        xiaoxin:
-          ansible_host: 192.168.100.103
-          ansible_user: fzw
+        iotdb-node1:
+          ansible_host: $TARGET_HOST
+          ansible_user: $TARGET_SSH_USER
           ansible_ssh_private_key_file: /opt/keys/id_ed25519
           ansible_python_interpreter: /usr/bin/python3
 EOF
   INV=$(jq -n --rawfile inv /tmp/sem_inv.yml --argjson pid "$PID" --argjson kid "$KID" \
-        '{name:"xiaoxin-static",project_id:$pid,type:"static-yaml",inventory:$inv,ssh_key_id:$kid,become_key_id:$kid}' |
+        '{name:"iotdb-static",project_id:$pid,type:"static-yaml",inventory:$inv,ssh_key_id:$kid,become_key_id:$kid}' |
         api -X POST "$BASE/api/project/$PID/inventory" -d @- | jq -r '.id')
   echo "inventory created: $INV"
 fi

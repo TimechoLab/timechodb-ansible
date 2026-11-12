@@ -1,3 +1,3 @@
-# 挂载到容器 /etc/gitconfig：放行容器内 uid 1001 克隆 fzw 拥有的仓库
+# 挂载到容器 /etc/gitconfig：放行容器内 uid 1001 克隆宿主机用户拥有的仓库
 [safe]
 	directory = *

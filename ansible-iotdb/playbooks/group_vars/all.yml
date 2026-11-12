@@ -39,7 +39,7 @@ docker_packages:
   - docker.io
   - docker-compose-v2
 docker_users:
-  - fzw
+  - "{{ ansible_user | default('iotdb-admin') }}"
 # 国内直连 registry-1.docker.io 会超时，使用镜像加速
 docker_registry_mirrors:
   - https://docker.m.daocloud.io
