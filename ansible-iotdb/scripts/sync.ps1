@@ -12,7 +12,7 @@ try {
     ssh @sshOpts $Target "mkdir -p ~/$RemoteDir"
     if ($LASTEXITCODE -ne 0) { throw "ssh mkdir failed ($LASTEXITCODE)" }
 
-    $items = @('ansible.cfg', 'inventory', 'roles', 'playbooks', 'scripts', 'deploy', 'README.md') |
+    $items = @('ansible.cfg', 'inventory', 'roles', 'playbooks', 'scripts', 'deploy', 'README.md', 'README-zh.md') |
         Where-Object { Test-Path $_ }
     scp @sshOpts -r -q $items ($Target + ':~/' + $RemoteDir + '/')
     if ($LASTEXITCODE -ne 0) { throw "scp failed ($LASTEXITCODE)" }
